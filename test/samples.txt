@@ -1,0 +1,17 @@
+# The recordings in testdata/ and what the binary must produce from each.
+# Read by test/check_sample.py (ctest, and build.sh's check in each container).
+#
+#   name|recording in testdata/|--program|control commands (';'-separated, - for none)|min audio s|max audio s (- for none)|expected text...
+#
+# Each expected text must appear somewhere in the status lines on fd 3 (the raw
+# JSON, so "sync":true is a valid one), except that one starting log: must
+# appear on stderr, after the log: ones before it. A control command of the
+# form "wait <text>" waits for that text on stderr before the next is sent.
+am_ma3_wshe_iq48|wshe_na5b_820000Hz_iq48.wav|0|-|15|-|"sync":true|"audio":true|WSHE|47104|Adult Hits|Practice Smiling|V.V. Lightbody|Period Piece [Clear]
+am_ma3_wshe_iq12|wshe_na5b_820000Hz_iq12.wav|0|-|15|-|"sync":true|"audio":true|WSHE|47104|Adult Hits|Practice Smiling|V.V. Lightbody|Period Piece [Clear]
+# WSHE carries HD1 only, so switching to HD2 over the control descriptor must
+# be acknowledged in the status and leave stdout empty.
+am_ma3_wshe_hd2_by_control|wshe_na5b_820000Hz_iq48.wav|0|program 1|0|0|"program":1|"sync":true|WSHE
+# A reset once the station is known must clear it and acquire it again from
+# scratch, as the wrapper does after a retune.
+am_ma3_wshe_reset|wshe_na5b_820000Hz_iq48.wav|0|wait audio decoding;reset|1|-|log:station WSHE|log:audio decoding|log:reset|log:lost sync|log:audio stopped|log:sync|log:station WSHE|log:audio decoding

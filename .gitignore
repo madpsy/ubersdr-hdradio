@@ -1,0 +1,11 @@
+# CMake build trees. build/ is the native one (./build.sh --native);
+# build-amd64/ and build-arm64/ are the per-arch container builds ./build.sh
+# makes — a CMake cache is not portable between architectures, so they cannot
+# share one tree.
+build/
+build-*/
+
+# Arch-suffixed binaries (e.g. ubersdr-hdradio_amd64, ubersdr-hdradio_arm64)
+ubersdr-hdradio_*
+
+__pycache__/

@@ -1,0 +1,86 @@
+--- a/src/acquire.h	2026-09-30 14:38:02.054425019 +0100
++++ b/src/acquire.h	2026-09-30 14:38:02.141422787 +0100
+@@ -9,6 +9,7 @@
+     struct input_t *input;
+     firdecim_cf32 filter_fm;
+     firdecim_cf32 filter_am;
++    firdecim_cf32 filter_am_ma3;
+     float complex in_buffer[FFTCP_FM * (ACQUIRE_SYMBOLS + 1)];
+     float complex buffer[FFTCP_FM * (ACQUIRE_SYMBOLS + 1)];
+     float complex sums[FFTCP_FM];
+--- a/src/acquire.c	2026-09-30 14:38:02.054425019 +0100
++++ b/src/acquire.c	2026-09-30 14:38:02.141422787 +0100
+@@ -95,6 +95,46 @@
+     0
+ };
+ 
++// Timing filter for all-digital AM (MA3). filter_taps_am passes only 10-15 kHz
++// from the carrier, where a hybrid station's primary sidebands are; an MA3
++// station's subcarriers sit within +/-9.5 kHz, so timing from that filter is
++// mostly noise and adjacent channels. This passes 1.5-14.7 kHz with an exact
++// null at the carrier. Used once the station has identified itself as MA3.
++static float filter_taps_am_ma3[] = {
++    -0.000366918555,
++    -0.00102589103,
++    0.000117091274,
++    -0.00397461269,
++    -0.00912765645,
++    -0.00256416324,
++    -0.013949171,
++    -0.034552714,
++    -0.0121589534,
++    -0.026309452,
++    -0.0856325515,
++    -0.027798917,
++    -0.0133824101,
++    -0.183876343,
++    -0.0404963236,
++    0.455098986,
++    0.455098986,
++    -0.0404963236,
++    -0.183876343,
++    -0.0133824101,
++    -0.027798917,
++    -0.0856325515,
++    -0.026309452,
++    -0.0121589534,
++    -0.034552714,
++    -0.013949171,
++    -0.00256416324,
++    -0.00912765645,
++    -0.00397461269,
++    0.000117091274,
++    -0.00102589103,
++    -0.000366918555
++};
++
+ void acquire_process(acquire_t *st)
+ {
+     float complex max_v = 0, phase_increment;
+@@ -122,7 +162,9 @@
+         float complex y;
+         for (i = 0; i < st->fftcp * (ACQUIRE_SYMBOLS + 1); i++)
+         {
+-            fir_cf32_execute((st->mode == NRSC5_MODE_FM) ? st->filter_fm : st->filter_am, &st->in_buffer[i], &y);
++            firdecim_cf32 filter = (st->mode == NRSC5_MODE_FM) ? st->filter_fm
++                                 : (st->input->sync.psmi == SERVICE_MODE_MA3) ? st->filter_am_ma3 : st->filter_am;
++            fir_cf32_execute(filter, &st->in_buffer[i], &y);
+             st->buffer[i] = (st->mode == NRSC5_MODE_FM) ? conjf(y) : y;
+         }
+ 
+@@ -311,6 +353,7 @@
+ 
+     st->filter_fm = firdecim_cf32_create(filter_taps_fm, sizeof(filter_taps_fm) / sizeof(filter_taps_fm[0]));
+     st->filter_am = firdecim_cf32_create(filter_taps_am, sizeof(filter_taps_am) / sizeof(filter_taps_am[0]));
++    st->filter_am_ma3 = firdecim_cf32_create(filter_taps_am_ma3, sizeof(filter_taps_am_ma3) / sizeof(filter_taps_am_ma3[0]));
+ 
+     pthread_mutex_lock(&fftw_mutex);
+     st->fftin = fftwf_alloc_complex(FFT_FM);
+@@ -370,6 +413,7 @@
+ {
+     firdecim_cf32_free(st->filter_fm);
+     firdecim_cf32_free(st->filter_am);
++    firdecim_cf32_free(st->filter_am_ma3);
+ 
+     pthread_mutex_lock(&fftw_mutex);
+     fftwf_destroy_plan(st->fft_plan_fm);
