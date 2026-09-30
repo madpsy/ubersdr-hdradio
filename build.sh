@@ -206,6 +206,8 @@ echo "CHECK_OK links only: $(echo $needed)"
 if [ "$check" = 1 ]; then
     "$build/resampler_test" | tail -1 | grep -q PASS || { "$build/resampler_test" >&2; exit 1; }
     echo "CHECK_OK resampler"
+    "$build/events_test" | tail -1 | grep -q PASS || { "$build/events_test" >&2; exit 1; }
+    echo "CHECK_OK events"
     rc=0
     python3 /src/test/check_sample.py "$binary" /src/test/samples.txt > /tmp/check.txt || rc=$?
     sed 's/^/CHECK_OK /' /tmp/check.txt
@@ -236,6 +238,7 @@ if [ "$native" = 1 ]; then
     if [ "$check" = 1 ]; then
         say "Checking $(basename "$binary")"
         "$repo/build/resampler_test" | tail -1
+        "$repo/build/events_test" || fail "the events test failed"
         python3 "$repo/test/check_sample.py" "$binary" "$repo/test/samples.txt" \
             || fail "the decode check failed"
     fi

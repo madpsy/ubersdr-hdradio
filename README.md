@@ -11,6 +11,7 @@ The decoder is [nrsc5](https://github.com/theori-io/nrsc5)'s library, built from
 ```
 ubersdr-hdradio [--input-sample-rate N] [--output-sample-rate N] [--program N]
                 [--status-fd n | --no-status] [--control-fd n | --no-control]
+                [--image-fd n | --no-images]
 ```
 
 | Descriptor | Direction | Carries |
@@ -19,9 +20,10 @@ ubersdr-hdradio [--input-sample-rate N] [--output-sample-rate N] [--program N]
 | stdout | out | the selected program's audio, stereo int16 little-endian at `--output-sample-rate` (default 48000). Written **only while the program is decoding**: nothing while acquiring, after losing sync, or for a program the station does not carry |
 | fd 3 | out | JSON Lines status (`--status-fd` moves it, `--no-status` turns it off) |
 | fd 4 | in | commands, one per line (`--control-fd` moves it, `--no-control` turns it off) |
-| stderr | out | one line per state change: sync, lost sync, station name, program, audio starting and stopping. Nothing periodic |
+| fd 5 | out | images: album art, station logos, HERE traffic and weather maps (`--image-fd` moves it, `--no-images` turns it off) |
+| stderr | out | one line per state change: sync, lost sync, station name, program, audio starting and stopping, each image received. Nothing periodic |
 
-fd 3 and fd 4 are optional and silent when absent, so it runs from a shell with stdout alone. It exits 0 when stdin reaches EOF or stdout's reader goes away.
+fd 3, 4 and 5 are optional and silent when absent, so it runs from a shell with stdout alone. It exits 0 when stdin reaches EOF or stdout's reader goes away.
 
 ### Input rate
 
@@ -42,13 +44,21 @@ tail -c +45 testdata/wshe_na5b_820000Hz_iq48.wav | ./ubersdr-hdradio_amd64 3>&1 
 ```json
 {"t":"status","sync":true,"freqOffset":0.4,"psmi":2,"merLower":null,"merUpper":null,
  "ber":0.090104,"country":"US","facilityId":47104,"name":"WSHE","slogan":"HD1 ",
- "message":"www.thegamut.fm 820 The Gamut!","alert":"","location":null,"program":0,
- "audio":true,"programs":[{"program":0,"type":7,"typeName":"Adult Hits",
- "title":"Practice Smiling","artist":"V.V. Lightbody","album":"Period Piece [Clear]",
- "genre":"","audio":true,"frames":443,"errors":0}]}
+ "message":"www.thegamut.fm 820 The Gamut!","alert":"","alertCategories":[],
+ "alertLocationFormat":"","alertLocations":[],"location":null,"localTime":null,
+ "leapSecond":null,"exciter":null,"importer":null,"importerConnected":null,
+ "dataServices":[{"type":31,"typeName":"Emergency","access":"public","mime":"00000444"}],
+ "program":0,"audio":true,"programs":[{"program":0,"type":7,"typeName":"Adult Hits",
+ "serviceName":"HD1 ","access":"public","surround":"","title":"Practice Smiling",
+ "artist":"V.V. Lightbody","album":"Period Piece [Clear]","genre":"","comments":[],
+ "commercial":null,"artLot":33778,"audio":true,"frames":443,"errors":0}]}
 ```
 
 (shown wrapped; it is one line)
+
+Anything the station has not sent is `null`, `""` or `[]`, so a reader can show exactly what has been received and nothing else.
+
+**Signal**
 
 | Field | Meaning |
 |---|---|
@@ -57,16 +67,70 @@ tail -c +45 testdata/wshe_na5b_820000Hz_iq48.wav | ./ubersdr-hdradio_amd64 3>&1 
 | `psmi` | primary service mode |
 | `merLower` `merUpper` | dB, per sideband. nrsc5 reports these for FM only, so on AM they stay `null` |
 | `ber` | bit error rate of the known reference bits; `null` until first measured |
+
+**Station**
+
+| Field | Meaning |
+|---|---|
 | `country` `facilityId` | from the station's SIS; `facilityId` is the FCC facility ID |
-| `name` `slogan` `message` `alert` | station name, slogan, text message and emergency alert, `""` until received |
-| `location` | `{lat, lon, alt}` once the station has sent one, else `null` |
+| `name` `slogan` `message` | station name, slogan and text message |
+| `location` | `{lat, lon, alt}` (degrees, metres), else `null`. Stations send it only now and then |
+| `localTime` | `{utcOffset, dstRegional, dstLocal, dstSchedule}`: the station's time zone in minutes from UTC, whether daylight saving is in effect there and practised locally, and its schedule (`"none"`, `"US/Canada"`, `"EU"`) |
+| `leapSecond` | `{current, pending, pendingAlfn}`: GPS–UTC offset in seconds, the offset after a pending leap second, and when it applies (ALFN, 0 if none) |
+| `exciter` `importer` | the transmitter chain: `{manufacturer, coreVersion, coreRelease, manufacturerVersion, manufacturerRelease}`, releases being `"commercial"`, `"engineering"` or `"patch"` |
+| `importerConnected` | whether the exciter reports an importer connected |
+| `dataServices` | the station's data services: `type`/`typeName` (e.g. 1 News, 31 Emergency), `access` (`"public"`/`"restricted"`) and `mime`, a name where nrsc5 knows one (`"album art"`, `"station logo"`, `"HERE traffic/weather images"`, …) and the hex type otherwise |
+
+**Alert**
+
+| Field | Meaning |
+|---|---|
+| `alert` | the emergency alert text, `""` if none |
+| `alertCategories` | up to two category names, e.g. `["Weather","Safety"]` |
+| `alertLocationFormat` `alertLocations` | the areas it covers: `"SAME"`, `"FIPS"` or `"ZIP"` and the codes (at most 64) |
+
+**Programs**
+
+| Field | Meaning |
+|---|---|
 | `program` | the selected program, 0 = HD1 |
 | `audio` | the selected program is decoding, so stdout is carrying audio. Goes `false` on lost sync as well as when the station stops sending the program |
-| `programs` | the programs heard or announced. Per program: `type`/`typeName` (the program type, e.g. 7 = Adult Hits), `title` `artist` `album` `genre` from ID3, `audio` as above, `frames`/`errors` decoded and failed audio frames |
+| `programs` | the programs heard, announced or described. Per program: |
+| &nbsp;&nbsp;`type` `typeName` | program type, e.g. 7 Adult Hits |
+| &nbsp;&nbsp;`serviceName` | the service's name in the station's SIG, e.g. `"MPS"`, `"SPS1"` |
+| &nbsp;&nbsp;`access` `surround` | `"public"`/`"restricted"`; `"Dolby Pro Logic II"` or `""` |
+| &nbsp;&nbsp;`title` `artist` `album` `genre` | from ID3 |
+| &nbsp;&nbsp;`comments` | ID3 comments, up to 4: `{lang, desc, text}` |
+| &nbsp;&nbsp;`commercial` | ID3 commercial frame (the song is for sale): `{price, seller, contactUrl, description, validUntil}`, else `null` |
+| &nbsp;&nbsp;`artLot` | the LOT id of the current song's album art (an image on fd 5 with that `lot`), or `null` for none. The station clears it between songs |
+| &nbsp;&nbsp;`audio` `frames` `errors` | decoding now; decoded and failed audio frames |
 
 Everything resets to empty on `reset` and at start-up; a field that has been received keeps its last value until then, since stations resend ID3 with fields left out.
 
-Every string comes from the station, so each is cut to 1 KiB (on a UTF-8 character boundary) and control characters are replaced with spaces. A line is therefore under 100 KiB however long what the station sends; a reader should accept lines up to 256 KiB. Treat the text as untrusted when displaying it.
+Every string comes from the station, so each is cut to 1 KiB (on a UTF-8 character boundary) and control characters are replaced with spaces. There are at most 226 strings, so a line is under 512 KiB however long what the station sends; a reader should accept lines up to 1 MiB. Treat the text as untrusted when displaying it.
+
+### Images (fd 5)
+
+One frame per image, nothing between them:
+
+```
+[header length: u32 LE][header: JSON][data length: u32 LE][data]
+```
+
+```json
+{"t":"image","kind":"art","program":0,"lot":33778,"mime":"image/jpeg","name":"cover.jpg","bounds":null}
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | `"art"` (album art), `"logo"` (station logo), `"traffic"` or `"weather"` (HERE maps) |
+| `program` | art and logos: the program they belong to (0 = HD1), else `null` |
+| `lot` | art and logos: the LOT id, which a program's `artLot` refers to |
+| `mime` | `"image/jpeg"` or `"image/png"`, from the file's own signature: nothing else is sent |
+| `name` | the file name the station gave it |
+| `bounds` | traffic and weather maps: `{north, west, south, east}` in degrees, else `null` |
+
+Files over 512 KiB are dropped. On AM, data capacity is small and a picture can take minutes to arrive — WSHE's recording names album art in its ID3 but the file does not finish within the 30 seconds — so art and logos appear some while after the station does, if the station sends any.
 
 ### Commands (fd 4)
 
@@ -83,7 +147,7 @@ For release binaries — both architectures, built the way they will run:
 ./build.sh
 ```
 
-This builds amd64 and arm64 inside `ubuntu:24.04` (the same image UberSDR's container uses for its runtime stage), refuses a binary that links anything beyond libc and libm, then plays every recording in `testdata/` through each binary as UberSDR would feed it (`test/check_sample.py`, reading `test/samples.txt`). Each must sync, name the station, show what was playing and produce audio; switching to a program the station does not carry, over fd 4, must be acknowledged and produce none; and a `reset` once the station is decoding must clear it and acquire it again. arm64 is built by running an arm64 container under binfmt/qemu, which needs:
+This builds amd64 and arm64 inside `ubuntu:24.04` (the same image UberSDR's container uses for its runtime stage), refuses a binary that links anything beyond libc and libm, then plays every recording in `testdata/` through each binary as UberSDR would feed it (`test/check_sample.py`, reading `test/samples.txt`). Each must sync, name the station, show what was playing and produce audio; switching to a program the station does not carry, over fd 4, must be acknowledged and produce none; and a `reset` once the station is decoding must clear it and acquire it again. `test/events_test.cpp` feeds the decoder the events a recording rarely has — finished album-art and logo transfers, HERE maps, alerts, local time, the transmitter's details, ID3 comments and commercial frames — and checks the status line and image frames they produce, including that non-images, oversized files and other services' files are dropped. arm64 is built by running an arm64 container under binfmt/qemu, which needs:
 
 ```bash
 docker run --privileged --rm tonistiigi/binfmt --install all

@@ -134,7 +134,7 @@ endif ()
 target_link_libraries(nrsc5_static PUBLIC faad_hdc ${FFTW3F_LIBRARY} m pthread)
 
 # --- the binary --------------------------------------------------------------------
-add_executable(ubersdr-hdradio src/main.cpp src/hd_decoder.cpp)
+add_executable(ubersdr-hdradio src/main.cpp src/hd_decoder.cpp src/wire.cpp)
 target_include_directories(ubersdr-hdradio PRIVATE src)
 target_compile_options(ubersdr-hdradio PRIVATE -Wall -Wextra)
 target_link_libraries(ubersdr-hdradio PRIVATE nrsc5_static)
@@ -171,6 +171,14 @@ enable_testing()
 add_executable(resampler_test test/resampler_test.cpp)
 target_include_directories(resampler_test PRIVATE src)
 add_test(NAME resampler COMMAND resampler_test)
+
+# events_test feeds the decoder events a recording rarely has -- finished
+# album-art and logo transfers, HERE maps, alerts, the transmitter's details
+# -- and checks the status line and image frames they produce.
+add_executable(events_test test/events_test.cpp src/hd_decoder.cpp src/wire.cpp)
+target_include_directories(events_test PRIVATE src)
+target_link_libraries(events_test PRIVATE nrsc5_static)
+add_test(NAME events COMMAND events_test)
 
 find_package(Python3 COMPONENTS Interpreter)
 if (Python3_FOUND)

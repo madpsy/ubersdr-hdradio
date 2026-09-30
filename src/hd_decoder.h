@@ -26,14 +26,63 @@ public:
     enum Mode { MODE_FM = 0, MODE_AM = 1 };
     static constexpr int MAX_PROGRAMS = 8; // nrsc5 numbers them 0..7; stations show them as HD1..HD8
 
+    struct Comment {
+        std::string lang, desc, text;
+    };
+
+    // An ID3 commercial frame: the song is for sale.
+    struct Commercial {
+        bool have = false;
+        std::string price, seller, contactUrl, description, validUntil; // validUntil YYYY-MM-DD
+        int receivedAs = -1;
+    };
+
     struct Program {
         bool present = false;    // announced by the station, or its audio has been heard
         int type = -1;           // NRSC5_PROGRAM_TYPE_*, -1 until known
         std::string typeName;
+        int access = -1;         // NRSC5_ACCESS_*, -1 until the SIS says
+        int soundExp = -1;       // 0 none, 2 Dolby Pro Logic II; -1 until the SIS says
+        std::string serviceName; // from the SIG, e.g. "MPS", "SPS1"
         std::string title, artist, album, genre;
+        std::vector<Comment> comments;
+        Commercial commercial;
+        // The LOT id of the current song's album art, from the ID3 XHDR, or
+        // -1: none named, or the station said to drop the last one.
+        int artLot = -1;
         uint64_t audioFrames = 0;
         uint64_t audioErrors = 0;
         bool audio = false;      // the last audio frame carried decoded audio
+    };
+
+    struct DataService {
+        int access = -1;
+        int type = -1;           // NRSC5_SERVICE_DATA_TYPE_*
+        std::string typeName;
+        uint32_t mime = 0;
+    };
+
+    // The exciter or importer in the station's transmitter chain.
+    struct Device {
+        bool have = false;
+        std::string manufacturer;
+        int coreVersion[4] = { 0, 0, 0, 0 };
+        int coreStatus = -1;     // 0 commercial release, 1 engineering, 2 patch
+        int manufacturerVersion[4] = { 0, 0, 0, 0 };
+        int manufacturerStatus = -1;
+    };
+
+    // A file the station sent that can be shown: album art, a station logo,
+    // or a HERE traffic or weather map.
+    struct Image {
+        std::string kind;        // "art", "logo", "traffic" or "weather"
+        int program = -1;        // art and logos: the program it belongs to, if known
+        int lot = -1;            // art and logos: LOT id (the ID3 XHDR refers to it)
+        std::string mime;        // "image/jpeg" or "image/png"
+        std::string name;
+        std::vector<uint8_t> data;
+        // traffic and weather: the map's edges.
+        float north = 0, west = 0, south = 0, east = 0;
     };
 
     struct Status {
@@ -47,9 +96,24 @@ public:
         std::string country;
         int facilityId = -1;
         std::string name, slogan, message, alert;
+        // The alert's categories (NRSC5_ALERT_CATEGORY_*, -1 if none) and
+        // the areas it covers, as SAME, FIPS or ZIP codes.
+        int alertCategory1 = -1, alertCategory2 = -1;
+        std::string alertCategory1Name, alertCategory2Name;
+        std::string alertLocationFormat;
+        std::vector<int> alertLocations;
         bool haveLocation = false;
         float latitude = 0, longitude = 0;
         int altitude = 0;
+        std::vector<DataService> dataServices;
+        bool haveLocalTime = false;
+        int utcOffset = 0;       // minutes
+        int dstRegional = 0, dstLocal = 0, dstSchedule = 0;
+        bool haveLeapSecond = false;
+        int leapCurrent = 0, leapPending = 0;
+        unsigned int leapPendingAlfn = 0;
+        Device exciter, importer;
+        int importerConnected = -1;
         Program programs[MAX_PROGRAMS];
     };
 
@@ -81,6 +145,17 @@ public:
 
     Status status();
 
+    // Images received since the last call, oldest first.
+    std::vector<Image> takeImages();
+
+    // For tests: handle an event exactly as if nrsc5 had reported it, which
+    // is the only way to reach the paths a short recording never does (a
+    // finished album-art transfer, an alert, the transmitter's details).
+    void injectEvent(const nrsc5_event_t* evt) {
+        std::lock_guard<std::mutex> lck(_dspMtx);
+        handleEvent(evt);
+    }
+
     static double nativeRate(Mode mode) {
         return mode == MODE_FM ? NRSC5_SAMPLE_RATE_NATIVE_FM : NRSC5_SAMPLE_RATE_NATIVE_AM;
     }
@@ -110,4 +185,5 @@ private:
 
     std::mutex _stateMtx;
     Status _state;
+    std::vector<Image> _images; // guarded by _stateMtx
 };

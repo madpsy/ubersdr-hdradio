@@ -9,12 +9,15 @@
  *
  * Metadata goes out as JSON Lines on a separate descriptor (fd 3 by default),
  * so stdout stays raw headerless PCM. Commands come in as lines on another
- * (fd 4 by default), because stdin is taken by the IQ.
+ * (fd 4 by default), because stdin is taken by the IQ. Images the station
+ * sends -- album art, station logos, HERE traffic and weather maps -- go out
+ * as length-prefixed frames on a third (fd 5 by default).
  *
  * Usage:
  *   ubersdr-hdradio [--input-sample-rate <N>] [--output-sample-rate <N>]
  *                   [--program <N>] [--status-fd <n> | --no-status]
  *                   [--control-fd <n> | --no-control]
+ *                   [--image-fd <n> | --no-images]
  *
  * --input-sample-rate <N>   IQ sample rate in Hz (default 48000). UberSDR's
  *                           iq48 covers a hybrid station's sidebands, which
@@ -27,6 +30,14 @@
  * --no-status               write no status even if the descriptor is open
  * --control-fd <n>          read commands from this descriptor (default 4)
  * --no-control              read no commands even if the descriptor is open
+ * --image-fd <n>            write images to this descriptor (default 5)
+ * --no-images               write no images even if the descriptor is open
+ *
+ * Image frames, one per image, nothing between them:
+ *   [header length: u32 LE][header: JSON][data length: u32 LE][data]
+ * The header is {"t":"image","kind":"art"|"logo"|"traffic"|"weather",
+ * "program":N|null,"lot":N|null,"mime":"image/jpeg"|"image/png","name":"...",
+ * "bounds":{"north","west","south","east"}|null}; see README.md.
  *
  * Commands, one per line on the control descriptor:
  *   program <N>   switch to program N (0-7). Takes effect with the next audio
@@ -36,6 +47,7 @@
  * Exits 0 when stdin reaches EOF or stdout's reader goes away.
  */
 #include "hd_decoder.h"
+#include "wire.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -69,25 +81,12 @@ static bool g_stdoutGone = false;
 static void usage(const char* argv0) {
     fprintf(stderr,
             "usage: %s [--input-sample-rate N] [--output-sample-rate N] [--program N]\n"
-            "          [--status-fd n | --no-status] [--control-fd n | --no-control]\n",
+            "          [--status-fd n | --no-status] [--control-fd n | --no-control]\n"
+            "          [--image-fd n | --no-images]\n",
             argv0);
 }
 
 // ─── output ──────────────────────────────────────────────────────────────────
-
-static bool writeAll(int fd, const void* buf, size_t len) {
-    const char* p = (const char*)buf;
-    while (len > 0) {
-        ssize_t n = write(fd, p, len);
-        if (n < 0) {
-            if (errno == EINTR) { continue; }
-            return false;
-        }
-        p += n;
-        len -= (size_t)n;
-    }
-    return true;
-}
 
 static void onAudio(const float* stereo, int frames, void* ctx) {
     (void)ctx;
@@ -104,115 +103,6 @@ static void onAudio(const float* stereo, int frames, void* ctx) {
     if (!writeAll(STDOUT_FILENO, pcm.data(), pcm.size() * sizeof(int16_t))) {
         g_stdoutGone = true;
     }
-}
-
-// ─── status ──────────────────────────────────────────────────────────────────
-
-// Every string in the status comes from the station, so each is cut to this
-// many bytes, and control characters become spaces rather than six-byte \u
-// escapes: nothing then grows more than two-fold when escaped. With 45 strings
-// at most (the station's 5, and 5 for each of 8 programs) a status line stays
-// under 100 KiB however hostile the station; README.md promises readers 256 KiB.
-static const size_t MAX_STRING_BYTES = 1024;
-
-static void jsonString(std::string& out, const std::string& in) {
-    std::string s = in;
-    if (s.size() > MAX_STRING_BYTES) {
-        // Back up to the start of a UTF-8 sequence, so the cut never leaves
-        // half a character.
-        size_t n = MAX_STRING_BYTES;
-        while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80) { n--; }
-        s.resize(n);
-    }
-    out += '"';
-    for (unsigned char c : s) {
-        if (c == '"' || c == '\\') {
-            out += '\\';
-            out += (char)c;
-        } else if (c < 0x20 || c == 0x7f) {
-            out += ' ';
-        } else {
-            out += (char)c;
-        }
-    }
-    out += '"';
-}
-
-static void jsonNumber(std::string& out, double v, const char* fmt = "%.2f") {
-    if (!std::isfinite(v)) {
-        out += "null";
-        return;
-    }
-    char buf[32];
-    snprintf(buf, sizeof(buf), fmt, v);
-    out += buf;
-}
-
-// One status line, without the trailing newline.
-static std::string statusJson(const HdDecoder::Status& s, int program) {
-    std::string j = "{\"t\":\"status\",\"sync\":";
-    j += s.synced ? "true" : "false";
-    j += ",\"freqOffset\":";
-    jsonNumber(j, s.freqOffset, "%.1f");
-    j += ",\"psmi\":" + std::to_string(s.psmi);
-    j += ",\"merLower\":";
-    if (s.haveMer) { jsonNumber(j, s.merLower); } else { j += "null"; }
-    j += ",\"merUpper\":";
-    if (s.haveMer) { jsonNumber(j, s.merUpper); } else { j += "null"; }
-    j += ",\"ber\":";
-    if (s.haveBer) { jsonNumber(j, s.ber, "%.6f"); } else { j += "null"; }
-    j += ",\"country\":";
-    jsonString(j, s.country);
-    j += ",\"facilityId\":";
-    j += s.facilityId >= 0 ? std::to_string(s.facilityId) : "null";
-    j += ",\"name\":";
-    jsonString(j, s.name);
-    j += ",\"slogan\":";
-    jsonString(j, s.slogan);
-    j += ",\"message\":";
-    jsonString(j, s.message);
-    j += ",\"alert\":";
-    jsonString(j, s.alert);
-    j += ",\"location\":";
-    if (s.haveLocation) {
-        j += "{\"lat\":";
-        jsonNumber(j, s.latitude, "%.5f");
-        j += ",\"lon\":";
-        jsonNumber(j, s.longitude, "%.5f");
-        j += ",\"alt\":" + std::to_string(s.altitude) + "}";
-    } else {
-        j += "null";
-    }
-    j += ",\"program\":" + std::to_string(program);
-    j += ",\"audio\":";
-    j += (program >= 0 && program < HdDecoder::MAX_PROGRAMS && s.programs[program].audio) ? "true" : "false";
-    j += ",\"programs\":[";
-    bool first = true;
-    for (int p = 0; p < HdDecoder::MAX_PROGRAMS; p++) {
-        const HdDecoder::Program& pr = s.programs[p];
-        if (!pr.present) { continue; }
-        if (!first) { j += ','; }
-        first = false;
-        j += "{\"program\":" + std::to_string(p);
-        j += ",\"type\":" + std::to_string(pr.type);
-        j += ",\"typeName\":";
-        jsonString(j, pr.typeName);
-        j += ",\"title\":";
-        jsonString(j, pr.title);
-        j += ",\"artist\":";
-        jsonString(j, pr.artist);
-        j += ",\"album\":";
-        jsonString(j, pr.album);
-        j += ",\"genre\":";
-        jsonString(j, pr.genre);
-        j += ",\"audio\":";
-        j += pr.audio ? "true" : "false";
-        j += ",\"frames\":" + std::to_string(pr.audioFrames);
-        j += ",\"errors\":" + std::to_string(pr.audioErrors);
-        j += '}';
-    }
-    j += "]}";
-    return j;
 }
 
 // The parts of the status worth a line on stderr when they change: the log is
@@ -287,6 +177,7 @@ int main(int argc, char** argv) {
     int program = 0;
     int statusFd = 3;
     int controlFd = 4;
+    int imageFd = 5;
 
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
@@ -306,6 +197,10 @@ int main(int argc, char** argv) {
             ok = parseInt(argv[++i], controlFd) && controlFd >= 0;
         } else if (strcmp(a, "--no-control") == 0) {
             controlFd = -1;
+        } else if (strcmp(a, "--image-fd") == 0 && hasArg) {
+            ok = parseInt(argv[++i], imageFd) && imageFd >= 0;
+        } else if (strcmp(a, "--no-images") == 0) {
+            imageFd = -1;
         } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(argv[0]);
             return 0;
@@ -333,6 +228,7 @@ int main(int argc, char** argv) {
         }
     }
     bool haveControl = controlFd >= 0 && fcntl(controlFd, F_GETFD) != -1;
+    bool haveImages = imageFd >= 0 && fcntl(imageFd, F_GETFD) != -1;
 
     HdDecoder decoder;
     decoder.setAudioRate(outputRate);
@@ -406,6 +302,17 @@ int main(int argc, char** argv) {
 
         decoder.process(iq.data(), (int)frames);
         framesIn += frames;
+        for (const HdDecoder::Image& img : decoder.takeImages()) {
+            if (!haveImages) { break; }
+            fprintf(stderr, "%s %s image%s%s, %zu bytes\n", TAG, img.kind.c_str(),
+                    img.program >= 0 ? " for HD" : "", img.program >= 0 ? std::to_string(img.program + 1).c_str() : "",
+                    img.data.size());
+            if (!writeImage(imageFd, img)) {
+                // The reader has gone; the audio carries on without images.
+                fprintf(stderr, "%s image channel closed\n", TAG);
+                haveImages = false;
+            }
+        }
         if (g_stdoutGone) {
             fprintf(stderr, "%s stdout closed\n", TAG);
             break;
